@@ -1,0 +1,19 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+cache_db/
+.streamlit/
+node_modules/
+.claude/
+
+# 민감 정보 - 개인 재정/계좌 데이터 (절대 커밋 금지)
+CLAUDE.md
+advisor/state.json
+advisor/journal.json
+img/
+*.jpg
+*.jpeg
+*.png
+*.screenshot
+사용매뉴얼.docx
