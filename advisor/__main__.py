@@ -25,10 +25,11 @@ def cmd_status(args):
     print(f"  포트폴리오 현황  [{datetime.now().strftime('%Y-%m-%d %H:%M')}]")
     print("=" * 60)
 
-    # 스윙 계좌
+    # 스윙 계좌 (청산 종목 제외)
     swing = state.get("swing", {})
     print(f"\n[스윙 계좌 - {swing.get('account', '')}]")
-    holdings = swing.get("holdings", [])
+    holdings = [h for h in swing.get("holdings", [])
+                if h.get("qty", 0) > 0 and h.get("status") != "closed"]
     total_value = 0
     for h in holdings:
         try:
@@ -133,6 +134,7 @@ def cmd_can_buy(args):
         rsi=data.get("rsi"),
         macd_hist=data.get("macd_hist"),
         above_ma20=data.get("above_ma20"),
+        bb_pctb=data.get("bb_pctb"),
     )
     checks = validator.validate_all()
 
@@ -217,10 +219,14 @@ def cmd_briefing(args):
         emoji = "🔥" if d["avg_change"] > 3 else ("🟢" if d["avg_change"] > 1 else ("🟡" if d["avg_change"] > -1 else "🔴"))
         print(f"  {emoji} {sector:8}: {d['avg_change']:+.2f}%")
 
-    # 내 포지션
+    # 내 포지션 (청산 종목 제외)
     print("\n[내 스윙 포지션]")
     state = load_state()
-    for h in state.get("swing", {}).get("holdings", []):
+    active = [h for h in state.get("swing", {}).get("holdings", [])
+              if h.get("qty", 0) > 0 and h.get("status") != "closed"]
+    if not active:
+        print("  (보유 종목 없음)")
+    for h in active:
         try:
             data = fetch_stock_price(h["ticker"], days=5)
             c = data.get("current", h["avg_price"])
@@ -258,10 +264,19 @@ def cmd_risk(args):
 
 def cmd_sectors(args):
     from advisor.sector import analyze_sectors
+    from advisor.portfolio import get_rules
     sectors = analyze_sectors()
+
+    # 가격 필터 기본값은 스윙 룰의 가격대
+    rules = get_rules()
+    default_lo, default_hi = rules.get("price_range", [3000, 50000])
+    price_max = args.price_max if args.price_max is not None else default_hi
+    price_min = args.price_min if args.price_min is not None else default_lo
 
     print("=" * 60)
     print(f"  섹터 회전 분석  [{datetime.now().strftime('%Y-%m-%d %H:%M')}]")
+    if args.price_max is not None or args.price_min is not None:
+        print(f"  (가격 필터: {price_min:,}~{price_max:,}원)")
     print("=" * 60)
     print(f"{'섹터':<16}{'오늘':>10}{'5일':>10}{'종목수':>8}  상태")
     print("-" * 60)
@@ -284,12 +299,23 @@ def cmd_sectors(args):
         print(f"{name:<16}{today:+9.2f}%{five:+9.2f}%{count:>8}  {status}")
 
     print()
-    # Top sector details
+    # Top sector details: 가격대 내 종목만
     if ranked:
         top_name, top_data = ranked[0]
+        eligible = [m for m in top_data["members"]
+                    if price_min <= m["price"] <= price_max]
         print(f"[오늘 최강 섹터: {top_name}]")
-        for m in top_data["members"][:5]:
-            print(f"  {m['name']:<14} {m['price']:>9,.0f}원 ({m['change_pct']:+.2f}%) | 5일 {m['ret_5d']:+.2f}%")
+        if eligible:
+            for m in eligible[:5]:
+                print(f"  {m['name']:<14} {m['price']:>9,.0f}원 ({m['change_pct']:+.2f}%) | 5일 {m['ret_5d']:+.2f}%")
+        else:
+            print(f"  (가격 {price_min:,}~{price_max:,}원 범위 내 종목 없음)")
+            # 가격 초과 참고용 표시
+            others = top_data["members"][:3]
+            if others:
+                print(f"\n  참고 — 가격 초과 종목:")
+                for m in others:
+                    print(f"    {m['name']:<14} {m['price']:>9,.0f}원 ({m['change_pct']:+.2f}%)")
 
 
 def cmd_us_status(args):
@@ -457,7 +483,11 @@ def main():
     p_risk.add_argument("--buy", type=int)
     p_risk.add_argument("--risk-pct", type=float, default=2)
 
-    sub.add_parser("sectors", help="섹터 회전 분석")
+    p_sectors = sub.add_parser("sectors", help="섹터 회전 분석")
+    p_sectors.add_argument("--price-max", type=int, dest="price_max",
+                           help="최강 섹터 종목 가격 상한 (기본: 룰 상한)")
+    p_sectors.add_argument("--price-min", type=int, dest="price_min",
+                           help="최강 섹터 종목 가격 하한 (기본: 룰 하한)")
     sub.add_parser("performance", help="누적 성과 통계")
     sub.add_parser("us-status", help="미국 주식 포트폴리오 현황")
     sub.add_parser("us-alternatives", help="미국 주식 대안 후보 분석")

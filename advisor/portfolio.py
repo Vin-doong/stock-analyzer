@@ -74,9 +74,15 @@ def save_state(state: dict):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def get_swing_holdings() -> list:
-    """스윙 보유 종목 리스트"""
-    return load_state().get("swing", {}).get("holdings", [])
+def get_swing_holdings(include_closed: bool = False) -> list:
+    """스윙 보유 종목 리스트. qty 0 또는 status='closed' 종목은 기본 제외."""
+    holdings = load_state().get("swing", {}).get("holdings", [])
+    if include_closed:
+        return holdings
+    return [
+        h for h in holdings
+        if h.get("qty", 0) > 0 and h.get("status") != "closed"
+    ]
 
 
 def get_swing_cash() -> int:

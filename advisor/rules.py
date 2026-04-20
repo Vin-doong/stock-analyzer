@@ -25,7 +25,8 @@ class BuyValidator:
                  rsi: Optional[float] = None,
                  macd_hist: Optional[float] = None,
                  above_ma20: Optional[bool] = None,
-                 market_cap: Optional[int] = None):
+                 market_cap: Optional[int] = None,
+                 bb_pctb: Optional[float] = None):
         self.ticker = ticker
         self.name = name
         self.price = price
@@ -36,6 +37,7 @@ class BuyValidator:
         self.macd_hist = macd_hist
         self.above_ma20 = above_ma20
         self.market_cap = market_cap
+        self.bb_pctb = bb_pctb
         self.rules = get_rules()
 
     def validate_all(self) -> list[RuleCheck]:
@@ -54,6 +56,8 @@ class BuyValidator:
             checks.append(self._check_macd())
         if self.above_ma20 is not None:
             checks.append(self._check_ma20())
+        if self.bb_pctb is not None:
+            checks.append(self._check_bollinger_pctb())
         return checks
 
     def _check_price_range(self) -> RuleCheck:
@@ -138,6 +142,21 @@ class BuyValidator:
             return RuleCheck(False, "20일선 미달",
                              "주가가 MA20 아래 (추세 약함)", "warn")
         return RuleCheck(True, "20일선", "체크 건너뜀", "pass")
+
+    def _check_bollinger_pctb(self) -> RuleCheck:
+        lo = self.rules.get("bb_pctb_min", 0.2)
+        hi = self.rules.get("bb_pctb_max", 0.95)
+        pct = self.bb_pctb * 100
+        if self.bb_pctb > hi:
+            return RuleCheck(False, "볼린저 %B 상단 돌파",
+                             f"{pct:.1f}% (상한 {hi*100:.0f}% 초과 — 과열, 추격 금지)",
+                             "warn")
+        if self.bb_pctb < lo:
+            return RuleCheck(False, "볼린저 %B 하단 근접",
+                             f"{pct:.1f}% (하한 {lo*100:.0f}% 미만 — 하락 추세 가능)",
+                             "warn")
+        return RuleCheck(True, "볼린저 %B",
+                         f"{pct:.1f}% (중단~상단 구간)", "pass")
 
 
 class SellAdvisor:
