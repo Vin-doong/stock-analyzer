@@ -135,6 +135,9 @@ def cmd_can_buy(args):
         macd_hist=data.get("macd_hist"),
         above_ma20=data.get("above_ma20"),
         bb_pctb=data.get("bb_pctb"),
+        adx=data.get("adx"),
+        ret_60d=data.get("ret_60d"),
+        ret_90d=data.get("ret_90d"),
     )
     checks = validator.validate_all()
 

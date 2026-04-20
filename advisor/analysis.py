@@ -34,6 +34,19 @@ def fetch_stock_price(ticker: str, days: int = 90) -> dict:
     current = rt["price"]
     ma20 = summary.get("ma20")
 
+    # 중장기 모멘텀 (60일/90일 수익률)
+    ret_60d = None
+    ret_90d = None
+    try:
+        if df is not None and len(df) >= 61:
+            ret_60d = (current / float(df["Close"].iloc[-61]) - 1) * 100
+        if df is not None and len(df) >= 91:
+            ret_90d = (current / float(df["Close"].iloc[-91]) - 1) * 100
+        elif df is not None and not df.empty:
+            ret_90d = (current / float(df["Close"].iloc[0]) - 1) * 100
+    except Exception:
+        pass
+
     return {
         "ticker": ticker,
         "name": rt.get("name"),
@@ -57,6 +70,9 @@ def fetch_stock_price(ticker: str, days: int = 90) -> dict:
         "ma20": ma20,
         "ma60": summary.get("ma60"),
         "above_ma20": current > ma20 if ma20 else None,
+        # 중장기 모멘텀
+        "ret_60d": ret_60d,
+        "ret_90d": ret_90d,
     }
 
 
