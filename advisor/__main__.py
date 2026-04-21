@@ -129,6 +129,7 @@ def cmd_can_buy(args):
 
     validator = BuyValidator(
         ticker=ticker, name=name, price=price, qty=qty,
+        style=args.style,
         volume_ratio=data.get("volume_ratio"),
         daily_change_pct=data.get("day_change_pct"),
         rsi=data.get("rsi"),
@@ -138,6 +139,8 @@ def cmd_can_buy(args):
         adx=data.get("adx"),
         ret_60d=data.get("ret_60d"),
         ret_90d=data.get("ret_90d"),
+        market_cap=data.get("market_cap"),
+        trading_value=data.get("trading_value"),
     )
     checks = validator.validate_all()
 
@@ -145,7 +148,7 @@ def cmd_can_buy(args):
     print(f"  매수 가능 여부: {name} ({ticker})")
     print(f"  {qty}주 × {price:,}원 = {qty*price:,}원")
     print("=" * 60)
-    print(format_check_result(checks))
+    print(format_check_result(checks, style=args.style))
 
 
 def cmd_log(args):
@@ -464,6 +467,9 @@ def main():
     p_buy.add_argument("--qty", type=int, required=True)
     p_buy.add_argument("--price", type=int)
     p_buy.add_argument("--name", type=str)
+    p_buy.add_argument("--style", type=str, default="swing",
+                       choices=["swing", "day", "long"],
+                       help="투자 스타일 (swing/day/long). 기본: swing")
 
     p_log = sub.add_parser("log", help="매매 기록")
     p_log.add_argument("action", choices=["buy", "sell", "stop_loss", "target_hit"])

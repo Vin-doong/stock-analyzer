@@ -90,9 +90,13 @@ def get_swing_cash() -> int:
     return load_state().get("swing", {}).get("cash", 0)
 
 
-def get_rules() -> dict:
-    """스윙 규칙"""
-    return load_state().get("rules", {}).get("swing", {})
+def get_rules(style: str = "swing") -> dict:
+    """투자 스타일별 규칙. style: 'swing' | 'day' | 'long'"""
+    rules = load_state().get("rules", {})
+    # 기존 호환: rules가 swing dict 형태면 그대로 반환
+    if "price_range" in rules:
+        return rules
+    return rules.get(style, rules.get("swing", {}))
 
 
 def update_swing_cash(new_cash: int):

@@ -73,6 +73,9 @@ def fetch_stock_price(ticker: str, days: int = 90) -> dict:
         # 중장기 모멘텀
         "ret_60d": ret_60d,
         "ret_90d": ret_90d,
+        # 유동성 지표
+        "trading_value": rt.get("trade_value"),  # 거래대금
+        "turnover_rate": rt.get("turnover_rate"),
     }
 
 
