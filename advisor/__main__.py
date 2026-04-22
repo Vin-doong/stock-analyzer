@@ -10,10 +10,20 @@
   python -m advisor risk --stop 24000 --cash 500000 --risk-pct 2
   python -m advisor sectors                    # 섹터 회전 분석
   python -m advisor performance                # 누적 성과
+  python -m advisor scan                       # 전종목 스캔 (스윙, 상위 10 정밀)
+  python -m advisor scan --style day --top 5   # 단타 상위 5개 정밀
+  python -m advisor scan --no-precise --top 20 # 1차 필터만 20개
 """
 import sys
 import argparse
 from datetime import datetime
+
+# Windows cp949 콘솔에서 이모지 등 non-BMP 문자 출력 시 크래시 방지
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 
 def cmd_status(args):
@@ -413,6 +423,85 @@ def cmd_us_alternatives(args):
         print(f"  {symbol:<8} {desc}")
 
 
+def cmd_scan(args):
+    from advisor.scan import scan_all
+
+    style = args.style
+    top_n = args.top
+    precise = not args.no_precise
+    include_held = args.include_held
+
+    print("=" * 68)
+    print(f"  전종목 스캔  [{datetime.now().strftime('%Y-%m-%d %H:%M')}]  스타일: {style.upper()}")
+    print("=" * 68)
+
+    try:
+        result = scan_all(style=style, top_n=top_n, precise=precise,
+                          include_held=include_held)
+    except Exception as e:
+        print(f"[오류] 스캔 실패: {e}")
+        return
+
+    print(f"전종목 {result['total_market']:,}개 중 1차 필터 통과: "
+          f"{result['filter_passed']}개")
+    print(f"정밀 분석 상위 {top_n}개" + (" (정밀 모드)" if precise else " (1차만)"))
+    if not include_held:
+        print("(보유 종목 제외)")
+    print("-" * 68)
+
+    rows = result["results"]
+    if not rows:
+        print("  통과 종목 없음.")
+        return
+
+    if not precise:
+        print(f"{'종목':<14}{'코드':<8}{'가격':>10}{'등락':>8}{'거래대금':>12}{'시총':>12}")
+        for r in rows:
+            if "error" in r:
+                print(f"  {r.get('name', '?')} : {r['error']}")
+                continue
+            amt = r["trading_value"] / 1e8
+            cap = r["market_cap"] / 1e8
+            print(f"  {r['name'][:12]:<12}{r['ticker']:<8}{r['price']:>10,}"
+                  f"{r['chg_pct']:>+7.2f}%{amt:>10,.0f}억{cap:>10,.0f}억")
+        return
+
+    # 정밀 모드 — 점수 포함
+    print(f"{'순위':<4}{'종목':<14}{'코드':<8}{'가격':>9}{'등락':>8}"
+          f"{'RSI':>6}{'MACD':>8}{'BB%B':>7}{'60d':>8}{'점수':>7}  판정")
+    print("-" * 68)
+    for i, r in enumerate(rows, 1):
+        if "error" in r:
+            print(f"  {i:<2}. {r.get('name', '?')} ({r.get('ticker', '?')}): {r['error']}")
+            continue
+        rsi = f"{r['rsi']:.0f}" if r.get("rsi") is not None else "-"
+        macd = f"{r['macd_hist']:+.0f}" if r.get("macd_hist") is not None else "-"
+        bb = f"{r['bb_pctb']*100:.0f}%" if r.get("bb_pctb") is not None else "-"
+        r60 = f"{r['ret_60d']:+.0f}%" if r.get("ret_60d") is not None else "-"
+        blocked = " 🚫" if r.get("hard_block") else ""
+        print(f"  {i:<2} {r['name'][:12]:<12}{r['ticker']:<8}"
+              f"{r['price']:>9,}{r['chg_pct']:>+7.2f}%"
+              f"{rsi:>6}{macd:>8}{bb:>7}{r60:>8}"
+              f"{r['score']:>5}/{r['total']:<2}  {r['action']}{blocked}")
+        if r.get("fails"):
+            print(f"      탈락 사유: {', '.join(r['fails'])}")
+
+    print("-" * 68)
+    # 진입 가능 후보만 요약
+    ok = [r for r in rows
+          if "error" not in r
+          and not r.get("hard_block")
+          and r.get("score", 0) / max(r.get("total", 1), 1) >= 0.6]
+    if ok:
+        print(f"\n[✅ 점수 60%+ 진입 가능 후보 {len(ok)}개]")
+        for r in ok:
+            pct = r["score"] / max(r["total"], 1) * 100
+            print(f"  {r['name']} ({r['ticker']}) "
+                  f"{r['price']:,}원 — {r['score']}/{r['total']} ({pct:.0f}%)")
+    else:
+        print("\n[⚠️ 점수 60%+ 진입 가능 후보 없음 — 관망 유지]")
+
+
 def cmd_performance(args):
     from advisor.performance import calculate_performance, monthly_summary
     perf = calculate_performance()
@@ -501,6 +590,17 @@ def main():
     sub.add_parser("us-status", help="미국 주식 포트폴리오 현황")
     sub.add_parser("us-alternatives", help="미국 주식 대안 후보 분석")
 
+    p_scan = sub.add_parser("scan", help="전종목 스캔 (KOSPI+KOSDAQ)")
+    p_scan.add_argument("--style", type=str, default="swing",
+                        choices=["swing", "day", "long"],
+                        help="투자 스타일 (기본: swing)")
+    p_scan.add_argument("--top", type=int, default=10,
+                        help="정밀 분석할 상위 N개 (기본: 10)")
+    p_scan.add_argument("--no-precise", action="store_true",
+                        help="정밀 분석 생략 (1차 필터만)")
+    p_scan.add_argument("--include-held", action="store_true",
+                        help="보유 종목 포함 (기본: 제외)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -519,6 +619,7 @@ def main():
         "performance": cmd_performance,
         "us-status": cmd_us_status,
         "us-alternatives": cmd_us_alternatives,
+        "scan": cmd_scan,
     }
     dispatch[args.command](args)
 
