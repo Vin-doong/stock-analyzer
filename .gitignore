@@ -11,6 +11,7 @@ node_modules/
 CLAUDE.md
 advisor/state.json
 advisor/journal.json
+learning/
 img/
 *.jpg
 *.jpeg
