@@ -449,53 +449,235 @@ class BuyValidator:
 
 
 class SellAdvisor:
-    """매도 타이밍 조언 (스윙 기준)"""
+    """매도 타이밍 조언 (스윙 기준).
 
-    def __init__(self, ticker: str, current_price: int, days_held: int):
+    매도 결정을 정형화해 사용자 직관 의존을 제거한다.
+    5가지 룰 트리거 + 5가지 매도 신호 + 시장 상황 동적 조정 + 트레일링 스탑.
+
+    트리거 종류:
+      [룰] 손절선 / 목표가 / 시간 상한 / 시간 알람 / 트레일링 스탑
+      [신호] 거래량 매도세 / 고점 반납 / 추세 약화 / 섹터 동조 / 시장 약세
+    """
+
+    def __init__(self, ticker: str, current_price: int, days_held: int,
+                 high_today: Optional[int] = None,
+                 prev_close: Optional[int] = None,
+                 volume_ratio: Optional[float] = None,
+                 rsi: Optional[float] = None,
+                 adx: Optional[float] = None,
+                 adx_prev: Optional[float] = None,
+                 sector_change_pct: Optional[float] = None,
+                 market_change_pct: Optional[float] = None,
+                 market_regime: Optional[str] = None):
         self.ticker = ticker
         self.current_price = current_price
         self.days_held = days_held
+        self.high_today = high_today
+        self.prev_close = prev_close
+        self.volume_ratio = volume_ratio
+        self.rsi = rsi
+        self.adx = adx
+        self.adx_prev = adx_prev
+        self.sector_change_pct = sector_change_pct
+        self.market_change_pct = market_change_pct
+        self.market_regime = market_regime  # "강세" / "중립" / "약세"
         self.rules = get_rules("swing")
         self.holding = next(
             (h for h in get_swing_holdings() if h["ticker"] == ticker), None
         )
 
-    def advise(self) -> list[str]:
-        if not self.holding:
-            return ["보유 종목이 아님"]
+    def _adjusted_thresholds(self) -> dict:
+        """시장 상황 기반 동적 임계 조정.
 
-        advice = []
+        강세장: 손절 완화 (-5%), 시간 알람 늦춤 (D+10), 시간 상한 D+14
+        중립장: 기본값 (-4%, D+7, D+14)
+        약세장: 손절 강화 (-3%), 시간 알람 빠르게 (D+5), 시간 상한 D+10
+        """
+        base_stop = abs(self.rules.get("stop_loss_pct", -4))  # 4
+        base_alert = self.rules.get("alert_holding_days", 7)
+        base_max = self.rules.get("max_holding_days", 14)
+
+        if self.market_regime == "강세":
+            return {"stop_pct": -5, "alert_days": 10, "max_days": 14, "context": "강세"}
+        if self.market_regime == "약세":
+            return {"stop_pct": -3, "alert_days": 5, "max_days": 10, "context": "약세"}
+        return {"stop_pct": -base_stop, "alert_days": base_alert,
+                "max_days": base_max, "context": "중립"}
+
+    def _trailing_stop(self) -> Optional[int]:
+        """1차/2차 매도 후 트레일링 스탑 가격 계산.
+
+        1차 hit: 손절선을 평단으로 끌어올림 (본전 보전)
+        2차 hit: 손절선을 1차 매도가로 끌어올림 (1차 수익 보전)
+        """
+        if not self.holding:
+            return None
+        targets = self.holding.get("targets", [])
+        avg = self.holding["avg_price"]
+        original_stop = self.holding.get("stop_loss", 0)
+
+        first_hit = targets and targets[0].get("hit")
+        second_hit = len(targets) >= 2 and targets[1].get("hit")
+
+        if second_hit:
+            sold_at = targets[0].get("sold_at") or targets[0].get("price")
+            return max(original_stop, sold_at)
+        if first_hit:
+            return max(original_stop, avg)
+        return None
+
+    def advise(self) -> dict:
+        """매도 조언. dict 반환 (구조화된 출력)."""
+        if not self.holding:
+            return {"status": "not_held", "messages": ["보유 종목이 아님"]}
+
         avg = self.holding["avg_price"]
         pnl_pct = (self.current_price / avg - 1) * 100
+        thr = self._adjusted_thresholds()
 
+        rule_triggers: list[str] = []
+        signals: list[str] = []
+        info: list[str] = []
+
+        # ===== 룰 트리거 (명시적, 정형화) =====
+
+        # 1. 손절선
         stop = self.holding.get("stop_loss", 0)
         if stop and self.current_price <= stop:
-            advice.append(f"🚨 손절선 {stop:,}원 이탈 → 즉시 매도 (재협상 금지)")
+            rule_triggers.append(
+                f"🚨 손절선 {stop:,}원 이탈 → 즉시 전량 매도 (재협상 금지)"
+            )
 
+        # 2. 트레일링 스탑 (1차/2차 매도 후)
+        trail = self._trailing_stop()
+        if trail and self.current_price <= trail:
+            rule_triggers.append(
+                f"🚨 트레일링 스탑 {trail:,}원 이탈 → 잔여 전량 매도 (1차/2차 수익 보전)"
+            )
+
+        # 3. 시장 상황 보정 손절 (사용자 평단 대비)
+        adj_stop_price = int(avg * (1 + thr["stop_pct"] / 100))
+        if self.current_price <= adj_stop_price and self.current_price > (stop or 0):
+            rule_triggers.append(
+                f"🚨 {thr['context']} 보정 손절 {adj_stop_price:,}원 도달 "
+                f"({thr['stop_pct']}% / 평단 {avg:,}) → 전량 매도 검토"
+            )
+
+        # 4. 목표가 분할 매도
         targets = self.holding.get("targets", [])
         for t in targets:
             if not t.get("hit") and self.current_price >= t["price"]:
-                advice.append(
+                rule_triggers.append(
                     f"🎯 {t['price']:,}원 도달 → {t['qty']}주 분할 매도"
                 )
 
-        max_days = self.rules.get("max_holding_days", 14)
-        alert_days = self.rules.get("alert_holding_days", 7)
-        if self.days_held >= max_days:
-            advice.append(
-                f"⏰ 보유 {self.days_held}일차 (상한 {max_days}일 초과) → 전량 매도"
+        # 5. 시간 상한
+        if self.days_held >= thr["max_days"]:
+            rule_triggers.append(
+                f"⏰ 보유 {self.days_held}일차 ({thr['context']} 상한 "
+                f"{thr['max_days']}일 초과) → 전량 매도"
             )
-        elif self.days_held >= alert_days:
+        elif self.days_held >= thr["alert_days"]:
             if pnl_pct < 5:
-                advice.append(
-                    f"⏰ 보유 {self.days_held}일차 (주의 {alert_days}일), "
-                    f"목표 미달성 → 50% 매도 고려"
+                rule_triggers.append(
+                    f"⏰ 보유 {self.days_held}일차 ({thr['context']} 알람 "
+                    f"{thr['alert_days']}일), 목표 미달성 → 50% 매도 고려"
                 )
 
-        if not advice:
-            advice.append("✅ 보유 유지 (손절/목표/시간 조건 미충족)")
+        # ===== 매도 신호 (감정 의존 대체용) =====
 
-        return advice
+        # SIGNAL 1: 거래량 매도세 (평소 2배+ + 당일 음봉)
+        if (self.volume_ratio is not None and self.volume_ratio >= 2.0
+                and self.prev_close is not None
+                and self.current_price < self.prev_close):
+            signals.append(
+                f"📉 거래량 매도세: {self.volume_ratio:.1f}x 폭증 + 음봉 "
+                f"→ 50% 매도 신호"
+            )
+
+        # SIGNAL 2: 고점 반납 (당일 고점 대비 -5% 이상)
+        if self.high_today and self.current_price > 0:
+            reverted = (self.high_today - self.current_price) / self.high_today * 100
+            if reverted >= 5:
+                signals.append(
+                    f"📉 고점 반납 -{reverted:.1f}% (고점 {self.high_today:,} "
+                    f"→ 현재 {self.current_price:,}) → 추세 정점 가능성"
+                )
+
+        # SIGNAL 3: 추세 약화 (RSI 70+ AND ADX 하락)
+        if (self.rsi is not None and self.rsi >= 70
+                and self.adx is not None and self.adx_prev is not None
+                and self.adx < self.adx_prev):
+            signals.append(
+                f"📉 추세 약화: RSI {self.rsi:.0f} 과매수 + ADX 하락 "
+                f"({self.adx_prev:.1f}→{self.adx:.1f}) → 30% 매도 검토"
+            )
+
+        # SIGNAL 4: 섹터 약세 동조 (섹터 -2% + 종목 -1.5%)
+        if (self.sector_change_pct is not None and self.sector_change_pct <= -2
+                and self.prev_close is not None and self.current_price > 0):
+            stock_chg = (self.current_price / self.prev_close - 1) * 100
+            if stock_chg <= -1.5:
+                signals.append(
+                    f"📉 섹터 약세 동조: 섹터 {self.sector_change_pct:+.1f}% + "
+                    f"종목 {stock_chg:+.1f}% → 구조적 약세 가능성"
+                )
+
+        # SIGNAL 5: 시장 약세 전환 (KOSPI/KOSDAQ -2%+)
+        if (self.market_change_pct is not None
+                and self.market_change_pct <= -2):
+            signals.append(
+                f"📉 시장 약세 전환: 지수 {self.market_change_pct:+.1f}% "
+                f"→ 시스템 보호 50% 매도 검토"
+            )
+
+        # ===== 정보 출력 =====
+        info.append(
+            f"📊 평단 {avg:,} / 현재 {self.current_price:,} "
+            f"({pnl_pct:+.2f}%) / D+{self.days_held} / 시장 {thr['context']}"
+        )
+        if trail:
+            info.append(f"🛡️ 트레일링 스탑: {trail:,}원")
+
+        # 종합 판정
+        if rule_triggers:
+            status = "rule_action"
+        elif signals:
+            status = "signal_warn"
+        else:
+            status = "hold"
+            info.append("✅ 보유 유지 (룰 트리거·매도 신호 모두 미발동)")
+
+        return {
+            "status": status,
+            "rule_triggers": rule_triggers,
+            "signals": signals,
+            "info": info,
+            "thresholds": thr,
+            "trailing_stop": trail,
+        }
+
+
+def format_sell_advice(advice: dict) -> str:
+    """SellAdvisor.advise() 결과를 사람이 읽을 수 있게 포맷."""
+    if advice["status"] == "not_held":
+        return "보유 종목이 아님"
+    lines = []
+    for line in advice.get("info", []):
+        lines.append(f"  {line}")
+    if advice.get("rule_triggers"):
+        lines.append("")
+        lines.append("  [룰 트리거]")
+        for t in advice["rule_triggers"]:
+            lines.append(f"  {t}")
+    if advice.get("signals"):
+        lines.append("")
+        lines.append("  [매도 신호]")
+        for s in advice["signals"]:
+            lines.append(f"  {s}")
+    if advice["status"] == "hold":
+        pass  # info에 이미 포함
+    return "\n".join(lines)
 
 
 def calculate_score(checks: list[RuleCheck]) -> tuple[int, int]:

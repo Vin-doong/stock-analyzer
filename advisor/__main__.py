@@ -515,6 +515,121 @@ def cmd_scan(args):
                   f"{r['price']:,}원 — {r['score']}/{r['total']} ({pct:.0f}%) [{fails}]")
 
 
+def _ticker_to_sector(ticker: str) -> str | None:
+    """종목 코드 → 섹터 이름 역매핑."""
+    from advisor.sector import SECTORS
+    for sector_name, stocks in SECTORS.items():
+        for tk, _ in stocks:
+            if tk == ticker:
+                return sector_name
+    return None
+
+
+def _fetch_sell_context(ticker: str) -> dict:
+    """SellAdvisor에 필요한 시장 컨텍스트 수집."""
+    from advisor.analysis import fetch_stock_price, fetch_market_overview
+    from advisor.sector import analyze_sectors
+    from analysis.market_regime import get_market_regime
+
+    data = fetch_stock_price(ticker)
+    ctx = {
+        "current_price": int(data.get("current", 0)),
+        "high_today": int(data.get("high", 0)) or None,
+        "prev_close": int(data.get("prev_close", 0)) or None,
+        "volume_ratio": data.get("volume_ratio"),
+        "rsi": data.get("rsi"),
+        "adx": data.get("adx"),
+    }
+
+    # ADX 전일 값
+    try:
+        from data.fetcher_kr import get_price_data
+        from analysis.technical import add_all_indicators
+        df = get_price_data(ticker, days=60)
+        if df is not None and len(df) > 1:
+            df_ind = add_all_indicators(df)
+            if "adx" in df_ind.columns and len(df_ind) >= 2:
+                ctx["adx_prev"] = float(df_ind["adx"].iloc[-2])
+    except Exception:
+        ctx["adx_prev"] = None
+
+    # 섹터 변동
+    sector = _ticker_to_sector(ticker)
+    if sector:
+        try:
+            sectors = analyze_sectors()
+            if sector in sectors:
+                ctx["sector_change_pct"] = sectors[sector]["avg_today"]
+                ctx["sector_name"] = sector
+        except Exception:
+            pass
+
+    # 시장 변동 + 국면 (KOSPI/KOSDAQ 종목 자동 판별 — 6자리 코드는 한국, 첫자리로 구분 어려움)
+    # 단순화: KOSPI 우선, 없으면 KOSDAQ. 둘 중 더 약세인 쪽 사용.
+    try:
+        mkt = fetch_market_overview()
+        kospi_chg = mkt.get("kospi", {}).get("day_change", 0)
+        kosdaq_chg = mkt.get("kosdaq", {}).get("day_change", 0)
+        ctx["market_change_pct"] = min(kospi_chg, kosdaq_chg)
+    except Exception:
+        pass
+
+    try:
+        regime = get_market_regime("KOSPI")
+        ctx["market_regime"] = regime.get("regime", "중립")
+    except Exception:
+        ctx["market_regime"] = "중립"
+
+    return ctx
+
+
+def cmd_sell_check(args):
+    """보유 종목 매도 신호 체크 (정형화된 룰 + 매도 신호)."""
+    from advisor.rules import SellAdvisor, format_sell_advice
+    from advisor.portfolio import get_swing_holdings, days_held
+
+    target_ticker = args.ticker
+    holdings = get_swing_holdings()
+    if target_ticker:
+        holdings = [h for h in holdings if h["ticker"] == target_ticker]
+
+    if not holdings:
+        print("보유 종목 없음")
+        return
+
+    print("=" * 68)
+    print(f"  매도 신호 체크  [{datetime.now().strftime('%Y-%m-%d %H:%M')}]")
+    print("=" * 68)
+
+    for h in holdings:
+        ticker = h["ticker"]
+        ctx = _fetch_sell_context(ticker)
+        if not ctx.get("current_price"):
+            print(f"\n[{h['name']} ({ticker})] 데이터 조회 실패")
+            continue
+
+        d = days_held(h.get("entry_date", ""))
+        advisor = SellAdvisor(
+            ticker=ticker,
+            current_price=ctx["current_price"],
+            days_held=d,
+            high_today=ctx.get("high_today"),
+            prev_close=ctx.get("prev_close"),
+            volume_ratio=ctx.get("volume_ratio"),
+            rsi=ctx.get("rsi"),
+            adx=ctx.get("adx"),
+            adx_prev=ctx.get("adx_prev"),
+            sector_change_pct=ctx.get("sector_change_pct"),
+            market_change_pct=ctx.get("market_change_pct"),
+            market_regime=ctx.get("market_regime"),
+        )
+        result = advisor.advise()
+
+        sector_str = f" / 섹터: {ctx.get('sector_name', '?')}"
+        print(f"\n[{h['name']} ({ticker})]{sector_str}")
+        print(format_sell_advice(result))
+
+
 def cmd_performance(args):
     from advisor.performance import calculate_performance, monthly_summary
     perf = calculate_performance()
@@ -599,6 +714,9 @@ def main():
                            help="최강 섹터 종목 가격 상한 (기본: 룰 상한)")
     p_sectors.add_argument("--price-min", type=int, dest="price_min",
                            help="최강 섹터 종목 가격 하한 (기본: 룰 하한)")
+    p_sell = sub.add_parser("sell-check", help="보유 종목 매도 신호 체크")
+    p_sell.add_argument("ticker", nargs="?", help="특정 종목 (생략 시 전체)")
+
     sub.add_parser("performance", help="누적 성과 통계")
     sub.add_parser("us-status", help="미국 주식 포트폴리오 현황")
     sub.add_parser("us-alternatives", help="미국 주식 대안 후보 분석")
@@ -633,6 +751,7 @@ def main():
         "us-status": cmd_us_status,
         "us-alternatives": cmd_us_alternatives,
         "scan": cmd_scan,
+        "sell-check": cmd_sell_check,
     }
     dispatch[args.command](args)
 
