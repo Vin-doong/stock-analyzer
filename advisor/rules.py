@@ -264,6 +264,11 @@ class BuyValidator:
                          "warn", weight=w, score=0)
 
     def _check_rsi(self) -> RuleCheck:
+        """RSI 단계 점수화 (이분법 X).
+        - 범위 안: 중앙 가까울수록 만점
+        - 범위 위쪽 초과: 5 단위로 점진 차감 (강세장 대장주 수용)
+        - 범위 아래쪽 초과: 약세 종목이라 더 빠르게 감점
+        """
         lo, hi = self.rules.get("rsi_range", [40, 70])
         w = self.weights["rsi"]
         if lo <= self.rsi <= hi:
@@ -273,9 +278,31 @@ class BuyValidator:
             return RuleCheck(True, "RSI",
                              f"{self.rsi:.1f} (범위 {lo}~{hi})",
                              "pass", weight=w, score=s)
-        return RuleCheck(False, "RSI 범위 벗어남",
-                         f"{self.rsi:.1f} (권장 {lo}~{hi})",
-                         "warn", weight=w, score=0)
+        if self.rsi > hi:
+            # 과매수 단계: hi+5까지 70%, hi+10까지 40%, hi+15까지 15%, 그 이상 0
+            over = self.rsi - hi
+            if over <= 5:
+                s = int(w * 0.7)
+            elif over <= 10:
+                s = int(w * 0.4)
+            elif over <= 15:
+                s = int(w * 0.15)
+            else:
+                s = 0
+            return RuleCheck(s > 0, "RSI 과매수권",
+                             f"{self.rsi:.1f} (권장 {lo}~{hi}, 상한 {over:.0f} 초과)",
+                             "warn", weight=w, score=s)
+        # 과매도: 약세 신호이므로 더 보수적 (lo-5까지 50%, lo-10까지 20%, 그 이상 0)
+        under = lo - self.rsi
+        if under <= 5:
+            s = int(w * 0.5)
+        elif under <= 10:
+            s = int(w * 0.2)
+        else:
+            s = 0
+        return RuleCheck(s > 0, "RSI 과매도권",
+                         f"{self.rsi:.1f} (권장 {lo}~{hi}, 하한 {under:.0f} 미달)",
+                         "warn", weight=w, score=s)
 
     def _check_macd(self) -> RuleCheck:
         w = self.weights["macd"]
@@ -308,18 +335,42 @@ class BuyValidator:
                          "pass", weight=w, score=int(w * 0.5))
 
     def _check_bollinger_pctb(self) -> RuleCheck:
+        """볼린저 %B 단계 점수화 (이분법 X).
+        - 적정 구간 (0.4~0.7): 만점
+        - 정상 구간 안: 70%
+        - 상단 돌파: 0.05 단위로 점진 차감 (강세 종목이 밴드 상단 타고 가는 패턴 수용)
+        - 하단 근접: 약세 신호이므로 더 빠르게 감점
+        """
         lo = self.rules.get("bb_pctb_min", 0.2)
         hi = self.rules.get("bb_pctb_max", 0.95)
         w = self.weights["bb_pctb"]
         pct = self.bb_pctb * 100
         if self.bb_pctb > hi:
-            return RuleCheck(False, "볼린저 %B 상단 돌파",
+            # 상단 돌파 단계: hi+0.05까지 60%, hi+0.10까지 30%, hi+0.20까지 10%, 그 이상 0
+            over = self.bb_pctb - hi
+            if over <= 0.05:
+                s = int(w * 0.6)
+            elif over <= 0.10:
+                s = int(w * 0.3)
+            elif over <= 0.20:
+                s = int(w * 0.1)
+            else:
+                s = 0
+            return RuleCheck(s > 0, "볼린저 %B 상단 돌파",
                              f"{pct:.1f}% (상한 {hi*100:.0f}% 초과 — 과열)",
-                             "warn", weight=w, score=0)
+                             "warn", weight=w, score=s)
         if self.bb_pctb < lo:
-            return RuleCheck(False, "볼린저 %B 하단 근접",
+            # 하단 근접 단계: lo-0.05까지 40%, lo-0.10까지 15%, 그 이상 0
+            under = lo - self.bb_pctb
+            if under <= 0.05:
+                s = int(w * 0.4)
+            elif under <= 0.10:
+                s = int(w * 0.15)
+            else:
+                s = 0
+            return RuleCheck(s > 0, "볼린저 %B 하단 근접",
                              f"{pct:.1f}% (하한 {lo*100:.0f}% 미만 — 하락 추세)",
-                             "warn", weight=w, score=0)
+                             "warn", weight=w, score=s)
         if 0.4 <= self.bb_pctb <= 0.7:
             s = w
         else:
@@ -468,8 +519,10 @@ def format_check_result(checks: list[RuleCheck], style: str = "swing") -> str:
     lines = []
     hard_block = any(c.hard_block for c in checks)
 
-    hard_checks = [c for c in checks if c.weight == 0]
-    scored_checks = [c for c in checks if c.weight > 0]
+    # 하드 제약: hard_block이거나 가중치 없는 사전 검증 (보유 종목 수 등)
+    hard_checks = [c for c in checks if c.hard_block or c.weight == 0]
+    # 점수 지표: 가중치 있고 hard_block 아닌 것만
+    scored_checks = [c for c in checks if c.weight > 0 and not c.hard_block]
 
     lines.append(f"  [투자 스타일: {style.upper()}]")
     lines.append("")

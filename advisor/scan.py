@@ -82,14 +82,16 @@ def score_candidate(ticker: str, name: str, style: str) -> dict:
         trading_value=data.get("trading_value"),
     )
     checks = validator.validate_all()
-    scored_checks = [c for c in checks if c.weight > 0]
+    scored_checks = [c for c in checks if c.weight > 0 and not c.hard_block]
     score, total = calculate_score(scored_checks)
-    hard_block = any(c.hard_block for c in checks if c.weight > 0)
+    hard_block = any(c.hard_block for c in checks)
 
     # 상태 요약
     action, _ = score_to_action(score, total)
-    # 실패한 가중치 체크 상위 3개 (score=0 & weight>0)
+    # 실패한 가중치 체크 상위 3개 (score=0 & weight>0, hard_block 제외)
     fails = [c.name for c in scored_checks if c.score == 0][:3]
+    # 탈락 사유가 있으면 진입 불가 (점수와 별개)
+    has_fails = len(fails) > 0
 
     return {
         "ticker": ticker,
@@ -108,6 +110,7 @@ def score_candidate(ticker: str, name: str, style: str) -> dict:
         "action": action,
         "hard_block": hard_block,
         "fails": fails,
+        "has_fails": has_fails,
     }
 
 
