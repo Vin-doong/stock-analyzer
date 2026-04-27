@@ -140,6 +140,22 @@ def score_candidate(ticker: str, name: str, style: str,
     }
 
 
+def _get_excluded_tickers() -> set[str]:
+    """state.json swing.watched_excluded에서 제외 목록 가져오기.
+
+    review_date가 오늘 이전이면 자동 복귀 (제외 해제).
+    """
+    from advisor.portfolio import load_state
+    from datetime import date
+    state = load_state()
+    excluded = state.get("swing", {}).get("watched_excluded", [])
+    today = date.today().isoformat()
+    return {
+        e["ticker"] for e in excluded
+        if e.get("review_date", "9999-12-31") > today
+    }
+
+
 def scan_all(
     style: str = "swing",
     top_n: int = 10,
@@ -159,6 +175,11 @@ def scan_all(
         }
         if held_tickers:
             filtered = filtered[~filtered["Code"].isin(held_tickers)]
+
+    # 사용자 관심 제외 종목 필터 (자동 복귀 review_date 적용)
+    excluded = _get_excluded_tickers()
+    if excluded:
+        filtered = filtered[~filtered["Code"].isin(excluded)]
 
     filtered = filtered.sort_values("Amount", ascending=False)
     filtered_count = len(filtered)
