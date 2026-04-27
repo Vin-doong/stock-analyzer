@@ -487,27 +487,37 @@ def cmd_scan(args):
             print(f"      탈락 사유: {', '.join(r['fails'])}")
 
     print("-" * 68)
-    # 진입 가능 후보 분류:
-    #   clean    = 점수 60+ AND 탈락 사유 0개 AND hard_block X → 진짜 진입 가능
-    #   risky    = 점수 60+ AND 탈락 사유 있음 → 조건부 (위험 신호 확인 필수)
+    # 진입 가능 후보 분류 (점수 = 후행, 시장 경고 = 선행):
+    #   clean   = 점수 60+ AND 탈락 사유 0 AND 시장 경고 0 → 진짜 진입 가능
+    #   warned  = 점수 60+ AND 탈락 사유 0 AND 시장 경고 있음 → 시장 신호 확인 필수
+    #   risky   = 점수 60+ AND 탈락 사유 있음 → 점수만 통과
     valid = [r for r in rows
              if "error" not in r
              and not r.get("hard_block")
              and r.get("score", 0) / max(r.get("total", 1), 1) >= 0.6]
-    clean = [r for r in valid if not r.get("has_fails")]
+    clean = [r for r in valid if not r.get("has_fails") and not r.get("warned")]
+    warned = [r for r in valid if not r.get("has_fails") and r.get("warned")]
     risky = [r for r in valid if r.get("has_fails")]
 
     if clean:
-        print(f"\n[✅ 진입 가능 후보 {len(clean)}개 — 점수 60+ AND 탈락 사유 0]")
+        print(f"\n[✅ 진입 가능 후보 {len(clean)}개 — 점수 + 시장 신호 깨끗]")
         for r in clean:
             pct = r["score"] / max(r["total"], 1) * 100
             print(f"  {r['name']} ({r['ticker']}) "
                   f"{r['price']:,}원 — {r['score']}/{r['total']} ({pct:.0f}%)")
     else:
-        print("\n[⚠️ 진입 가능 후보 없음 (점수 60+ AND 탈락 사유 0) — 관망 유지]")
+        print("\n[⚠️ 진입 가능 후보 없음 (점수 + 시장 신호 동시 통과 0개) — 관망]")
+
+    if warned:
+        print(f"\n[🟡 시장 경고 후보 {len(warned)}개 — 점수 통과 BUT 선행 신호 위험]")
+        for r in warned:
+            pct = r["score"] / max(r["total"], 1) * 100
+            wm = ', '.join(r.get('market_warnings', [])[:2])
+            print(f"  {r['name']} ({r['ticker']}) "
+                  f"{r['price']:,}원 — {r['score']}/{r['total']} ({pct:.0f}%) [{wm}]")
 
     if risky:
-        print(f"\n[🟠 조건부 후보 {len(risky)}개 — 점수만 통과, 탈락 사유 확인 필수]")
+        print(f"\n[🟠 조건부 후보 {len(risky)}개 — 점수 통과 BUT 후행 지표 탈락]")
         for r in risky:
             pct = r["score"] / max(r["total"], 1) * 100
             fails = ', '.join(r.get('fails', [])[:2])

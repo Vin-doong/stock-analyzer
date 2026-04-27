@@ -680,6 +680,63 @@ def format_sell_advice(advice: dict) -> str:
     return "\n".join(lines)
 
 
+def check_market_warnings(
+    current_price: int,
+    high_today: Optional[int] = None,
+    prev_close: Optional[int] = None,
+    volume_ratio: Optional[float] = None,
+    rsi: Optional[float] = None,
+    adx: Optional[float] = None,
+    adx_prev: Optional[float] = None,
+    sector_change_pct: Optional[float] = None,
+    market_change_pct: Optional[float] = None,
+) -> list[str]:
+    """매수/매도 공통 시장 신호 체크 (선행 신호).
+
+    SellAdvisor의 매도 신호 5종을 BuyValidator에서도 사용해
+    점수가 후행적인 한계를 시장 신호로 보완.
+
+    Returns: 발동된 신호의 사람 읽기용 한 줄 설명 리스트
+    """
+    warnings = []
+
+    # 거래량 매도세 (2x+ 음봉)
+    if (volume_ratio is not None and volume_ratio >= 2.0
+            and prev_close is not None and current_price < prev_close):
+        warnings.append(f"거래량 매도세 ({volume_ratio:.1f}x + 음봉)")
+
+    # 고점 반납 (-5% 이상)
+    if high_today and current_price > 0:
+        reverted = (high_today - current_price) / high_today * 100
+        if reverted >= 5:
+            warnings.append(f"고점 -{reverted:.1f}% 반납")
+        elif reverted >= 3:
+            warnings.append(f"고점 -{reverted:.1f}% 반납 임박")
+
+    # 추세 약화 (RSI 70+ + ADX 하락)
+    if (rsi is not None and rsi >= 70
+            and adx is not None and adx_prev is not None
+            and adx < adx_prev):
+        warnings.append(
+            f"추세 약화 (RSI {rsi:.0f} + ADX {adx_prev:.0f}→{adx:.0f})"
+        )
+
+    # 섹터 약세 동조 (섹터 -2% + 종목 -1.5%)
+    if (sector_change_pct is not None and sector_change_pct <= -2
+            and prev_close is not None and current_price > 0):
+        stock_chg = (current_price / prev_close - 1) * 100
+        if stock_chg <= -1.5:
+            warnings.append(
+                f"섹터 약세 동조 (섹터 {sector_change_pct:+.1f}%/종목 {stock_chg:+.1f}%)"
+            )
+
+    # 시장 약세 전환 (지수 -2%+)
+    if market_change_pct is not None and market_change_pct <= -2:
+        warnings.append(f"시장 약세 ({market_change_pct:+.1f}%)")
+
+    return warnings
+
+
 def calculate_score(checks: list[RuleCheck]) -> tuple[int, int]:
     total_weight = sum(c.weight for c in checks)
     total_score = sum(c.score for c in checks)

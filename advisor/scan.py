@@ -46,10 +46,18 @@ def apply_hard_filters(df, style: str = "swing"):
     return df[mask].copy()
 
 
-def score_candidate(ticker: str, name: str, style: str) -> dict:
-    """단일 종목 정밀 점수화. fetch_stock_price + BuyValidator 조합."""
+def score_candidate(ticker: str, name: str, style: str,
+                    sector_change_pct=None,
+                    market_change_pct=None) -> dict:
+    """단일 종목 정밀 점수화. fetch_stock_price + BuyValidator 조합.
+
+    점수(후행 지표 합산) + 시장 신호(선행 신호) 동시 체크.
+    sector_change_pct, market_change_pct는 scan_all에서 1번 조회 후 전달.
+    """
     from advisor.analysis import fetch_stock_price
-    from advisor.rules import BuyValidator, calculate_score, score_to_action
+    from advisor.rules import (
+        BuyValidator, calculate_score, score_to_action, check_market_warnings,
+    )
 
     try:
         data = fetch_stock_price(ticker)
@@ -90,8 +98,22 @@ def score_candidate(ticker: str, name: str, style: str) -> dict:
     action, _ = score_to_action(score, total)
     # 실패한 가중치 체크 상위 3개 (score=0 & weight>0, hard_block 제외)
     fails = [c.name for c in scored_checks if c.score == 0][:3]
-    # 탈락 사유가 있으면 진입 불가 (점수와 별개)
     has_fails = len(fails) > 0
+
+    # 시장 신호 (선행 신호) — 점수의 후행성 보완
+    high_today = int(data.get("high", 0)) or None
+    prev_close = int(data.get("prev_close", 0)) or None
+    market_warnings = check_market_warnings(
+        current_price=price,
+        high_today=high_today,
+        prev_close=prev_close,
+        volume_ratio=data.get("volume_ratio"),
+        rsi=data.get("rsi"),
+        adx=data.get("adx"),
+        adx_prev=None,  # scan에선 비교 비용 큼 → 생략
+        sector_change_pct=sector_change_pct,
+        market_change_pct=market_change_pct,
+    )
 
     return {
         "ticker": ticker,
@@ -105,12 +127,16 @@ def score_candidate(ticker: str, name: str, style: str) -> dict:
         "volume_ratio": data.get("volume_ratio"),
         "above_ma20": data.get("above_ma20"),
         "ret_60d": data.get("ret_60d"),
+        "high_today": high_today,
+        "prev_close": prev_close,
         "score": score,
         "total": total,
         "action": action,
         "hard_block": hard_block,
         "fails": fails,
         "has_fails": has_fails,
+        "market_warnings": market_warnings,
+        "warned": len(market_warnings) > 0,
     }
 
 
@@ -146,9 +172,36 @@ def scan_all(
 
         pairs = [(row["Code"], row["Name"]) for _, row in top_df.iterrows()]
 
+        # 시장/섹터 데이터 사전 조회 (1번만, 모든 후보 공유)
+        market_chg = None
+        sector_map: dict[str, float] = {}
+        try:
+            from advisor.analysis import fetch_market_overview
+            mkt = fetch_market_overview()
+            kospi_chg = mkt.get("kospi", {}).get("day_change", 0)
+            kosdaq_chg = mkt.get("kosdaq", {}).get("day_change", 0)
+            market_chg = min(kospi_chg, kosdaq_chg)
+        except Exception:
+            pass
+        try:
+            from advisor.sector import analyze_sectors, SECTORS
+            sectors = analyze_sectors()
+            for sname, stocks in SECTORS.items():
+                avg = sectors.get(sname, {}).get("avg_today")
+                if avg is None:
+                    continue
+                for tk, _ in stocks:
+                    sector_map[tk] = avg
+        except Exception:
+            pass
+
         def _worker(p):
             code, name = p
-            return score_candidate(code, name, style)
+            return score_candidate(
+                code, name, style,
+                sector_change_pct=sector_map.get(code),
+                market_change_pct=market_chg,
+            )
 
         with ThreadPoolExecutor(max_workers=5) as ex:
             results = list(ex.map(_worker, pairs))
