@@ -690,6 +690,7 @@ def check_market_warnings(
     adx_prev: Optional[float] = None,
     sector_change_pct: Optional[float] = None,
     market_change_pct: Optional[float] = None,
+    ret_60d: Optional[float] = None,
 ) -> list[str]:
     """매수/매도 공통 시장 신호 체크 (선행 신호).
 
@@ -733,6 +734,14 @@ def check_market_warnings(
     # 시장 약세 전환 (지수 -2%+)
     if market_change_pct is not None and market_change_pct <= -2:
         warnings.append(f"시장 약세 ({market_change_pct:+.1f}%)")
+
+    # 60일 모멘텀 과열 (+100% 초과 = 1개월 1.5배 폭등)
+    # 점수 시스템(_check_momentum_60d)이 +60% 이상 모두 동일 처리하는 한계 보완
+    if ret_60d is not None:
+        if ret_60d >= 200:
+            warnings.append(f"60일 모멘텀 극과열 (+{ret_60d:.0f}%, 단기 조정 임박)")
+        elif ret_60d >= 100:
+            warnings.append(f"60일 모멘텀 과열 (+{ret_60d:.0f}%, 1개월 1.5배 이상)")
 
     return warnings
 

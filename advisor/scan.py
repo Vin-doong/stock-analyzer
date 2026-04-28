@@ -113,6 +113,7 @@ def score_candidate(ticker: str, name: str, style: str,
         adx_prev=None,  # scan에선 비교 비용 큼 → 생략
         sector_change_pct=sector_change_pct,
         market_change_pct=market_change_pct,
+        ret_60d=data.get("ret_60d"),
     )
 
     return {
